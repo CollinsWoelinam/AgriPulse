@@ -17,4 +17,5 @@ ENV GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR \
     GDAL_HTTP_MERGE_CONSECUTIVE_RANGES=YES \
     AWS_NO_SIGN_REQUEST=YES
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Keep-alive longer than mobile HTTP clients pool idle sockets (Dart: 15 s), so they never reuse a closed one.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-keep-alive", "75"]

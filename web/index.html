@@ -27,6 +27,18 @@
   button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--text);
            padding: 6px 12px; border-radius: 6px; cursor: pointer; }
   button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  #login { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; background: var(--bg); }
+  #login form { width: min(340px, calc(100vw - 32px)); background: var(--panel); border: 1px solid var(--line);
+                border-radius: 10px; padding: 20px; }
+  #login .error { color: var(--danger); min-height: 1.4em; margin: 0 0 8px; font-size: 13px; }
+  .whoami { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--muted);
+            margin: -4px 0 12px; }
+  .whoami button { padding: 2px 8px; font-size: 12px; }
+  .note-pop { max-width: 240px; font: 13px/1.4 system-ui, sans-serif; color: #1d2420; }
+  .note-pop .meta { color: #66706a; font-size: 12px; }
+  .note-pop img { width: 72px; height: 72px; object-fit: cover; border-radius: 4px; margin: 4px 4px 0 0; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #3ec5f0;
+            border: 2px solid #0b2530; vertical-align: -1px; margin-right: 4px; }
   button:disabled { opacity: .5; cursor: default; }
   input, select { font: inherit; width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;
                   background: var(--bg); color: var(--text); margin-bottom: 8px; }
@@ -70,12 +82,23 @@
 </style>
 </head>
 <body>
+<div id="login" hidden>
+  <form>
+    <h1>AgriPulse</h1>
+    <p class="sub">Sign in to continue</p>
+    <input id="l-email" type="email" placeholder="Email" autocomplete="username" required>
+    <input id="l-password" type="password" placeholder="Password" autocomplete="current-password" required>
+    <p class="error" id="l-error"></p>
+    <button class="primary" type="submit">Sign in</button>
+  </form>
+</div>
 <aside>
   <h1>AgriPulse</h1>
   <p class="sub">Sentinel-2 NDVI field health</p>
+  <div class="whoami"><span id="whoami"></span><button id="logout">Sign out</button></div>
 
   <div class="row">
-    <button id="draw" class="primary">Draw field</button>
+    <button id="draw" class="primary manager-only">Draw field</button>
     <span class="hint" id="draw-hint" hidden>Click to add points, double-click to finish.</span>
   </div>
   <form id="field-form" hidden>
@@ -90,11 +113,12 @@
 
   <section id="detail" hidden>
     <h2>Health</h2>
-    <div class="row">
+    <div class="row manager-only">
       <button id="process">Fetch last 90 days</button>
       <button id="delete" title="Delete field">Delete</button>
     </div>
     <p id="status" class="hint"></p>
+    <p class="hint"><span class="swatch"></span><span id="notes-count"></span></p>
     <div id="timeline" hidden>
       <figure>
         <figcaption>Mean NDVI <span>· shaded: min–max range</span></figcaption>
@@ -150,6 +174,14 @@ map.on("load", () => {
   map.addSource("targets", { type: "geojson", data: empty });
   map.addLayer({ id: "targets", type: "circle", source: "targets",
     paint: { "circle-radius": 5, "circle-color": "#e0452b", "circle-stroke-color": "#fff", "circle-stroke-width": 1.5 } });
+  map.addSource("notes", { type: "geojson", data: empty });
+  map.addLayer({ id: "notes", type: "circle", source: "notes",
+    paint: { "circle-radius": 6, "circle-color": "#3ec5f0", "circle-stroke-color": "#0b2530", "circle-stroke-width": 2 } });
+  map.on("click", "notes", (e) => showNotePopup(e.features[0].properties.id, e.lngLat));
+  for (const layer of ["notes", "targets", "fields-fill"]) {
+    map.on("mouseenter", layer, () => { if (!draft) map.getCanvas().style.cursor = "pointer"; });
+    map.on("mouseleave", layer, () => { if (!draft) map.getCanvas().style.cursor = ""; });
+  }
   map.addSource("draft", { type: "geojson", data: empty });
   map.addLayer({ id: "draft-line", type: "line", source: "draft", paint: { "line-color": "#ffd23f", "line-width": 2, "line-dasharray": [2, 1] } });
   map.addLayer({ id: "draft-pts", type: "circle", source: "draft", filter: ["==", "$type", "Point"],
@@ -169,8 +201,41 @@ let mapLoaded = false;
 const mapQueue = [];
 const whenMap = (fn) => (mapLoaded ? fn() : mapQueue.push(fn));
 
+// ---- Auth ----
+const storage = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} },
+};
+let token = storage.get("agripulse.token");
+let me = null;
+
+function showLogin(message = "") {
+  token = null; storage.set("agripulse.token", null);
+  $("l-error").textContent = message;
+  $("login").hidden = false;
+  $("l-email").focus();
+}
+$("login").querySelector("form").onsubmit = async (e) => {
+  e.preventDefault();
+  const res = await fetch(API + "/auth/login", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: $("l-email").value, password: $("l-password").value }) });
+  if (!res.ok) { $("l-error").textContent = "Wrong email or password."; return; }
+  token = (await res.json()).token; storage.set("agripulse.token", token);
+  $("login").hidden = true; $("l-password").value = "";
+  start();
+};
+$("logout").onclick = () => { storage.set("agripulse.token", null); location.reload(); };
+
+class AuthError extends Error {}
+
+async function authFetch(path, opts = {}) {
+  const res = await fetch(API + path, { ...opts, headers: { Authorization: `Bearer ${token}`, ...(opts.headers || {}) } });
+  if (res.status === 401) { showLogin("Your session expired. Sign in again."); throw new AuthError("signed out"); }
+  return res;
+}
+
 async function api(path, opts = {}) {
-  const res = await fetch(API + path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const res = await authFetch(path, { ...opts, headers: { "Content-Type": "application/json" } });
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
   return res.status === 204 ? null : res.json();
 }
@@ -243,7 +308,44 @@ async function select(id, fly = false) {
   await loadFields();
   if (fly && f) map.fitBounds(bounds(f.boundary), { padding: 60, maxZoom: 16 });
   $("detail").hidden = false; $("status").textContent = "";
-  await loadStats();
+  await Promise.all([loadStats(), loadNotes()]);
+}
+
+// ---- Scouting notes ----
+const CATEGORY_LABELS = {
+  pest_infestation: "Pest infestation", disease: "Disease", nitrogen_deficiency: "Nitrogen deficiency",
+  irrigation_failure: "Irrigation failure", weeds: "Weeds", weather_damage: "Weather damage",
+  no_issue: "No issue found", other: "Other",
+};
+let notes = [];
+
+async function loadNotes() {
+  notes = await api(`/fields/${selected}/notes`);
+  $("notes-count").textContent = notes.length
+    ? `${notes.length} scouting note${notes.length === 1 ? "" : "s"} on the map` : "No scouting notes yet.";
+  whenMap(() => map.getSource("notes").setData({ type: "FeatureCollection", features: notes.map((n) => ({
+    type: "Feature", geometry: { type: "Point", coordinates: [n.lon, n.lat] }, properties: { id: n.id } })) }));
+}
+
+async function showNotePopup(id, lngLat) {
+  const n = notes.find((x) => x.id === id);
+  if (!n) return;
+  const box = node("div", undefined, "note-pop");
+  box.append(node("b", CATEGORY_LABELS[n.category] || n.category));
+  if (n.note) box.append(node("div", n.note));
+  const when = new Date(n.observed_at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  box.append(node("div", `${n.author || "Unknown"} · ${when}`, "meta"));
+  const photos = node("div");
+  box.append(photos);
+  new maplibregl.Popup({ maxWidth: "260px" }).setLngLat(lngLat).setDOMContent(box).addTo(map);
+  for (const pid of n.photo_ids) {  // <img> can't send the auth header, so fetch as a blob
+    const res = await authFetch(`/photos/${pid}`);
+    if (!res.ok) continue;
+    const img = node("img");
+    img.src = URL.createObjectURL(await res.blob());
+    img.alt = "Scouting photo";
+    photos.append(img);
+  }
 }
 
 async function loadStats() {
@@ -422,14 +524,25 @@ $("delete").onclick = async () => {
   await api(`/fields/${selected}`, { method: "DELETE" });
   selected = null; $("detail").hidden = true;
   history.replaceState(null, "", location.pathname);
-  whenMap(clearOverlays);
+  whenMap(() => { clearOverlays(); map.getSource("notes").setData(empty); });
   loadFields();
 };
 
-loadFields().then(() => {
+async function start() {
+  try {
+    me = await api("/me");
+  } catch (err) {
+    if (!(err instanceof AuthError)) $("status").textContent = err.message;
+    return;
+  }
+  $("whoami").textContent = `${me.display_name} · ${me.role}`;
+  document.querySelectorAll(".manager-only").forEach((el) => { el.hidden = me.role !== "manager"; });
+  await loadFields();
   const linked = new URLSearchParams(location.hash.slice(1)).get("field");
   if (linked && fields.some((f) => f.id === linked)) select(linked, true);
-});
+}
+
+if (token) start(); else showLogin();
 </script>
 </body>
 </html>
