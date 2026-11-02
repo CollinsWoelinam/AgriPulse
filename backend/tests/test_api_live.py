@@ -169,3 +169,27 @@ def test_photo_upload(scout, manager, field):
     status, data = call("GET", f"/api/photos/{photo_id}", manager)
     assert status == 200 and data == jpeg
     assert call("GET", f"/api/photos/{photo_id}", login("outsider@example.com"))[0] == 404
+
+
+def test_field_list_summary(scout, field):
+    p = field["latest_pass"]
+    assert len(p["series"]) >= 2 and p["series"][-1] == pytest.approx(p["mean_ndvi"], abs=1e-3)
+    assert p["mean_change"] == pytest.approx(p["series"][-1] - p["series"][-2], abs=1e-3)
+    assert isinstance(p["alert"], bool)
+    assert 0 <= p["scouted_zone_count"] <= p["stress_zone_count"]
+
+
+def test_zone_note_count_and_org_feed(scout, field):
+    _, pkg = call("GET", f"/api/fields/{field['id']}/scouting", scout)
+    zone = pkg["zones"]["features"][0]
+    before = zone["properties"]["note_count"]
+    note_id = str(uuid.uuid4())
+    call("PUT", f"/api/notes/{note_id}", scout, note_body(field, zone_id=zone["id"]))
+    _, pkg = call("GET", f"/api/fields/{field['id']}/scouting", scout)
+    assert pkg["zones"]["features"][0]["properties"]["note_count"] == before + 1
+
+    status, feed = call("GET", "/api/notes?limit=5", scout)
+    assert status == 200 and len(feed) <= 5
+    assert feed[0]["id"] == note_id and feed[0]["field_name"] == field["field_name"]
+    _, outsider_feed = call("GET", "/api/notes", login("outsider@example.com"))
+    assert all(n["field_id"] != field["id"] for n in outsider_feed)

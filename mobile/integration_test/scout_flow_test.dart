@@ -1,7 +1,6 @@
 // End-to-end scouting flow against a running backend (docker compose up) with a processed field
-// and scout@example.com / correct-horse. Run on a simulator with location granted and set near the field:
-//
-//   flutter drive --driver test_driver/integration_test.dart --target integration_test/scout_flow_test.dart
+// and scout@example.com / correct-horse. Run with test_driver/run_ios.sh, which also grants location,
+// places the simulator near the field and captures the screenshots requested below.
 import 'dart:convert';
 
 import 'package:agripulse_scout/main.dart';
@@ -40,10 +39,13 @@ Future<void> settle(WidgetTester tester, [int ms = 1500]) async {
   }
 }
 
+Finder keyStartingWith(String prefix) =>
+    find.byWidgetPredicate((w) => w.key is ValueKey<String> && (w.key! as ValueKey<String>).value.startsWith(prefix));
+
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('scout signs in, saves a field offline, navigates to a target and logs an observation', (tester) async {
+  testWidgets('scout signs in, saves a field offline, navigates to the next target and logs an observation', (tester) async {
     final services = await Services.init();
     if (services.signedIn) await services.signOut();
     await tester.pumpWidget(ScoutApp(services: services));
@@ -53,52 +55,63 @@ void main() {
     await tester.enterText(find.byKey(const Key('email')), _email);
     await tester.enterText(find.byKey(const Key('password')), _password);
     FocusManager.instance.primaryFocus?.unfocus();
-    await settle(tester, 500);
+    await settle(tester, 800);
     await shot(tester, '01-login');
     await tester.tap(find.byKey(const Key('sign-in')));
 
-    // Fields list, then save the first field for offline use
-    final fieldTile = find.byWidgetPredicate((w) => w is ListTile && '${w.key}'.contains("'field-"));
-    await pumpUntil(tester, fieldTile);
+    // Fields: save the first field for offline use
+    final fieldCard = keyStartingWith('field-');
+    await pumpUntil(tester, fieldCard);
     await settle(tester, 500);
-    final fieldId = (tester.widget<ListTile>(fieldTile.first).key as ValueKey<String>).value.substring('field-'.length);
+    final fieldId = (tester.widget(fieldCard.first).key! as ValueKey<String>).value.substring('field-'.length);
     final download = find.byKey(Key('download-$fieldId'));
-    if (find.descendant(of: download, matching: find.byIcon(Icons.offline_pin)).evaluate().isEmpty) {
-      await tester.tap(download);
-    }
-    await pumpUntil(tester, find.descendant(of: download, matching: find.byIcon(Icons.offline_pin)),
-        timeout: const Duration(minutes: 2));
+    if (download.evaluate().isNotEmpty) await tester.tap(download);
+    await pumpUntil(tester, find.byKey(Key('offline-$fieldId')), timeout: const Duration(minutes: 2));
+    await pumpUntil(tester, find.byKey(const Key('scout-next')));
     await settle(tester);
     await shot(tester, '02-fields');
 
-    // Field map with targets
-    await tester.tap(fieldTile.first);
+    // Field map
+    await tester.tap(fieldCard.first);
     await pumpUntil(tester, find.byKey(const Key('target-1')));
     await pumpUntil(tester, find.textContaining('GPS ±'));
-    expect(find.textContaining('Map saved offline'), findsOneWidget);
-    expect(find.textContaining('offline copy'), findsNothing); // live data loaded, not the fallback
+    expect(find.text('Saved offline'), findsOneWidget);
+    expect(find.text('Offline copy'), findsNothing); // live data loaded, not the fallback
     await settle(tester, 6000); // imagery tiles
     await shot(tester, '03-map');
 
-    // Navigate to the most stressed target
-    await tester.tap(find.byKey(const Key('target-1')));
+    // Navigate to the next unscouted target
+    final nextRow = find.ancestor(of: find.text('Next up'), matching: keyStartingWith('target-')).first;
+    final nextRank = (tester.widget(nextRow).key! as ValueKey<String>).value.substring('target-'.length);
+    await tester.tap(nextRow);
     await pumpUntil(tester, find.byKey(const Key('distance')));
+    expect(find.text('Target $nextRank of 5'), findsOneWidget);
     await settle(tester);
     await shot(tester, '04-navigate');
 
-    // Log an observation for that target
+    // Log an observation for it
     await tester.tap(find.byKey(const Key('log-observation')));
-    await pumpUntil(tester, find.textContaining('Accuracy ±'));
-    await tester.tap(find.byKey(const Key('cat-nitrogen_deficiency')));
+    await pumpUntil(tester, find.byKey(const Key('location-sub')));
+    await tester.tap(find.byKey(const Key('cat-irrigation_failure')));
     final marker = 'integration ${DateTime.now().millisecondsSinceEpoch}';
-    await tester.enterText(find.byKey(const Key('note-text')), 'Pale lower leaves across the patch ($marker)');
+    await tester.enterText(find.byKey(const Key('note-text')), 'Dry patch along the headland ($marker)');
     FocusManager.instance.primaryFocus?.unfocus();
     await settle(tester, 800);
     await shot(tester, '05-observation');
     await tester.tap(find.byKey(const Key('save-note')));
+
+    // Back on the navigate screen, moved on to the following open target
     await pumpUntil(tester, find.text('Observation saved and uploaded.'));
+    await pumpUntil(tester, find.byKey(const Key('distance')));
+    expect(find.text('Target $nextRank of 5'), findsNothing);
+    await settle(tester, 1500);
+    await shot(tester, '06-navigate-next');
+
+    // Map shows the target as scouted
+    await tester.tap(find.byTooltip('Back'));
+    await pumpUntil(tester, find.byKey(const Key('target-1')));
     await settle(tester, 2500);
-    await shot(tester, '06-map-after-save');
+    await shot(tester, '07-map-after');
 
     // The server has it, attributed to the scout and linked to the target's zone
     final base = services.serverUrl;
@@ -108,9 +121,17 @@ void main() {
     final res = await http.get(Uri.parse('$base/api/fields/$fieldId/notes'), headers: {'Authorization': 'Bearer $token'});
     final notes = (jsonDecode(res.body) as List).where((n) => (n['note'] as String).contains(marker)).toList();
     expect(notes, hasLength(1));
-    expect(notes.single['category'], 'nitrogen_deficiency');
+    expect(notes.single['category'], 'irrigation_failure');
     expect(notes.single['author'], 'Sam Scout');
     expect(notes.single['zone_id'], isNotNull);
     expect(services.sync!.pending, 0);
+
+    // My notes tab lists it as uploaded
+    await tester.tap(find.byTooltip('Back'));
+    await pumpUntil(tester, find.text('My notes'));
+    await tester.tap(find.text('My notes'));
+    await pumpUntil(tester, find.textContaining(marker));
+    await settle(tester, 1000);
+    await shot(tester, '08-my-notes');
   });
 }
