@@ -1,0 +1,52 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: agripulse
+      POSTGRES_PASSWORD: agripulse
+      POSTGRES_DB: agripulse
+    ports: ["${DB_PORT:-5433}:5432"]  # host port; 5432 is often taken by a local Postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agripulse"]
+      interval: 3s
+      retries: 20
+
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql://agripulse:agripulse@db:5432/agripulse
+      TILER_PUBLIC_URL: http://localhost:8001
+      JWT_SECRET: ${JWT_SECRET:-dev-only-change-me}
+    ports: ["8000:8000"]
+    volumes:
+      - rasters:/data/rasters
+      - photos:/data/photos
+      - ./web:/app/web:ro
+    depends_on:
+      db: { condition: service_healthy }
+
+  worker:
+    build: ./backend
+    command: python -m app.worker
+    environment:
+      DATABASE_URL: postgresql://agripulse:agripulse@db:5432/agripulse
+    volumes:
+      - rasters:/data/rasters
+    depends_on:
+      db: { condition: service_healthy }
+    restart: unless-stopped
+
+  tiler:
+    image: ghcr.io/developmentseed/titiler:0.19.1
+    command: uvicorn titiler.application.main:app --host 0.0.0.0 --port 8000 --workers 2
+    ports: ["8001:8000"]
+    volumes:
+      - rasters:/data/rasters:ro
+
+volumes:
+  pgdata:
+  rasters:
+  photos:

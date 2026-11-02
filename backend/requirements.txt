@@ -1,0 +1,12 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+psycopg[binary]==3.2.3
+psycopg-pool==3.2.4
+pydantic-settings==2.6.1
+numpy==2.1.3
+rasterio==1.4.3
+shapely==2.0.6
+pystac-client==0.8.5
+procrastinate==3.10.0
+pyjwt==2.10.1
+argon2-cffi==23.1.0
