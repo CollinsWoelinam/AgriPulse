@@ -2,7 +2,8 @@
 
 Sentinel-2 NDVI field health analytics:
 field boundary → STAC search → cloud-masked NDVI + zonal stats + stress zones → PostGIS → map and trend chart,
-refreshed nightly by a durable job queue.
+refreshed nightly by a durable job queue. The **AgriPulse Scout** mobile app (`mobile/`) guides scouts to stress
+targets and records geotagged observations offline.
 
 ## Run
 
@@ -15,7 +16,16 @@ docker compose up --build
 - Tile server (TiTiler): http://localhost:8001
 - PostGIS: localhost:5433 (set `DB_PORT` to change), user/password/db `agripulse`
 
-Draw a field on the map, save it, then click **Fetch last 90 days**. The job runs in the `worker` service.
+Create users (there is no sign-up page). Managers draw and process fields; scouts view them and log observations:
+
+```bash
+docker compose exec api python -m app.auth add you@farm.com manager --name "Your Name"   # prompts for a password
+docker compose exec api python -m app.auth add scout@farm.com scout --name "Field Scout"
+```
+
+Set `JWT_SECRET` (environment or `.env`) to a long random value anywhere other than your own machine.
+
+Sign in as a manager, draw on the map, save it, then click **Fetch last 90 days**. The job runs in the `worker` service.
 
 Process a field from the CLI instead (runs inline, bypassing the queue):
 
@@ -36,12 +46,21 @@ Tests (synthetic rasters, no network):
 docker compose run --rm --no-deps api pytest -q
 ```
 
+Live API tests (auth, org isolation, notes, photos, MBTiles) against the running stack. They need a processed field
+and the users listed at the top of `backend/tests/test_api_live.py`:
+
+```bash
+docker compose exec -e AGRIPULSE_LIVE_URL=http://localhost:8000 api pytest -q tests/test_api_live.py
+```
+
 ### Upgrading an existing database
 
 `db/init/*.sql` only runs on a fresh volume. To apply a newer schema file to a running DB (all are idempotent):
 
 ```bash
-docker compose exec -T db psql -U agripulse -d agripulse < db/init/002_phase2.sql
+for f in db/init/002_phase2.sql db/init/003_auth_scouting.sql; do
+  docker compose exec -T db psql -U agripulse -d agripulse < $f
+done
 ```
 
 Then reprocess fields with `{"force": true}` to fill the new columns. The worker creates the Procrastinate queue tables itself on first start.
@@ -50,14 +69,17 @@ Then reprocess fields with `{"force": true}` to fill the new columns. The worker
 
 | Path | What |
 |---|---|
-| `db/init/` | PostGIS schema (`001`) and Phase 2 columns (`002`) |
+| `db/init/` | PostGIS schema (`001`), Phase 2 columns (`002`), users and scouting photos (`003`) |
+| `backend/app/auth.py` | Argon2 passwords, JWT bearer tokens, `manager`/`scout` roles, user CLI |
+| `backend/app/tiles.py` | NDVI tile URLs and offline MBTiles packages |
 | `backend/app/ndvi.py` | NDVI, SCL cloud mask, zonal stats, `StressRule`, stress-zone polygons, COG writer |
 | `backend/app/stac.py` | Earth Search STAC (Sentinel-2 L2A COGs on AWS) |
 | `backend/app/pipeline.py` | Per-field job: search → parallel scene reads → best pass per date → DB |
 | `backend/app/tasks.py` | Procrastinate queue: `process_field` task, nightly `nightly_refresh` periodic task |
 | `backend/app/worker.py` | Worker entrypoint (`python -m app.worker`) |
 | `backend/app/main.py` | FastAPI (`/api/...`) and static dashboard |
-| `web/index.html` | MapLibre dashboard: draw fields, trend chart, time slider, NDVI overlay, stress targets |
+| `web/index.html` | MapLibre dashboard: sign-in, draw fields, trend chart, time slider, NDVI overlay, stress targets, scout notes |
+| `mobile/` | Flutter scouting app (iOS and Android) |
 
 ## How the pipeline works
 
@@ -102,9 +124,42 @@ Relative mode assumes one crop per boundary. A polygon spanning several parcels 
 - `nightly_refresh` runs at 04:00 UTC (`NIGHTLY_CRON`), queueing every field for the last 10 days (`NIGHTLY_LOOKBACK_DAYS`)
   to catch scenes published late. Already-stored dates are skipped, so a run with nothing new takes a couple of seconds.
 
+## Scouting app (`mobile/`)
+
+```bash
+cd mobile
+flutter run                       # simulator/emulator: server defaults to localhost:8000 (iOS) / 10.0.2.2:8000 (Android)
+flutter test                      # unit tests: navigation math, declination, offline sync, MBTiles
+flutter drive --driver test_driver/integration_test.dart --target integration_test/scout_flow_test.dart
+```
+
+On a real phone, enter the server's LAN address under **Server** on the sign-in screen. Also set the API's
+`TILER_PUBLIC_URL` to an address the phone can reach, because online NDVI tiles come straight from TiTiler.
+
+- **Fields**: latest pass, number of targets and stressed share. The download button saves the field for offline use:
+  boundary, stress zones and pre-rendered NDVI tiles (MBTiles, z12–17).
+- **Map**: satellite imagery (online only), NDVI overlay (offline when saved), stress zones, numbered targets
+  (1 = most stressed), your position, your observations (amber = not uploaded yet).
+- **Navigate**: distance, compass direction and an arrow that turns with the phone. iOS gives true heading.
+  Android gives magnetic heading, which the app corrects with the World Magnetic Model 2025. Without a compass
+  (e.g. simulators) the arrow is north-up. "Arrived" shows within 10 m or the GPS accuracy, whichever is larger.
+- **Observations**: category, notes, photos, GPS position and accuracy. Saved to an on-device outbox first, then
+  uploaded on save, every minute, and when the app returns to the foreground. Note and photo ids are generated on
+  the phone and the server ignores repeats, so interrupted uploads simply retry. A note the server rejects stays
+  on the phone with its error and doesn't block the rest.
+
+API used by the app: `POST /api/auth/login`, `GET /api/fields`, `GET /api/fields/{id}/scouting`,
+`GET /api/stats/{id}/mbtiles`, `PUT /api/notes/{id}`, `PUT /api/notes/{id}/photos/{photo_id}` (raw image body).
+
 ## Known limitations / next steps
 
-- No auth yet: everything belongs to the seeded default organization.
+- No sign-up, password reset or refresh tokens. Tokens last 30 days (`TOKEN_TTL_DAYS`) so scouts can work offline.
+  Add login rate limiting before exposing the API publicly.
+- TiTiler tiles aren't behind auth. Raster paths contain unguessable field ids, but put the tiler behind the API
+  (or signed URLs) for production.
+- Photos are stored on a Docker volume. Use object storage (S3 with presigned uploads) in production.
+- Satellite basemap imagery isn't available offline (licensing). Offline maps show NDVI, zones and targets on a plain background.
+- The scouting app shows your own observations. Other scouts' notes are visible in the web dashboard.
 - A field split across two MGRS tiles on the same date isn't mosaicked. The more complete tile wins, and if neither covers 70% the pass is skipped.
 - Alerts only show in the dashboard. Next: push/email notifications.
 - Next indices: NDRE (B05, nitrogen) and NDMI (B8A/B11, water stress).
