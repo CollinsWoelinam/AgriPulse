@@ -21,6 +21,11 @@ def public_tile_url(raster_path: str) -> str:
     return settings.tiler_public_url + tile_path(raster_path)
 
 
+def public_preview_url(raster_path: str) -> str:
+    """The whole field raster as one small PNG (native 10 m pixels), for thumbnails."""
+    return f"{settings.tiler_public_url}/cog/preview.png?url={quote(raster_path)}&{NDVI_STYLE}&max_size=256"
+
+
 def _tile_xy(lon: float, lat: float, z: int) -> tuple[int, int]:
     n = 2**z
     x = int((lon + 180) / 360 * n)

@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 
-import 'screens/fields_screen.dart';
+import 'screens/home_shell.dart';
 import 'screens/login_screen.dart';
 import 'services.dart';
+import 'ui/theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -37,30 +38,17 @@ class _ScoutAppState extends State<ScoutApp> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) widget.services.sync?.syncNow(); // back from the field
   }
 
-  ThemeData _theme(Brightness b) {
-    final scheme = ColorScheme.fromSeed(seedColor: const Color(0xFF2F7D4A), brightness: b);
-    return ThemeData(
-      colorScheme: scheme,
-      // Outdoor use: larger tap targets.
-      materialTapTargetSize: MaterialTapTargetSize.padded,
-      visualDensity: VisualDensity.standard,
-      filledButtonTheme: FilledButtonThemeData(
-        style: FilledButton.styleFrom(minimumSize: const Size(64, 52), textStyle: const TextStyle(fontSize: 16)),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return ServicesScope(
       services: widget.services,
       child: MaterialApp(
         title: 'AgriPulse Scout',
-        theme: _theme(Brightness.light),
-        darkTheme: _theme(Brightness.dark),
+        // One light theme: outdoor readability; the navigate screen is dark on its own.
+        theme: agriTheme(),
         home: Builder(
           builder: (context) =>
-              ServicesScope.of(context).signedIn ? const FieldsScreen() : const LoginScreen(),
+              ServicesScope.of(context).signedIn ? const HomeShell() : const LoginScreen(),
         ),
       ),
     );

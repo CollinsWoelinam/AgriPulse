@@ -17,7 +17,7 @@ from app.auth import CurrentUser, Manager, User, authenticate, issue_token
 from app.config import settings
 from app.db import pool
 from app.tasks import enqueue_field, queue
-from app.tiles import mbtiles_for, public_tile_url
+from app.tiles import mbtiles_for, public_preview_url, public_tile_url
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -137,15 +137,25 @@ def create_field(body: FieldCreate, user: Manager):
 
 @api.get("/fields")
 def list_fields(user: CurrentUser):
-    """Fields with a summary of their latest pass (null if never processed)."""
+    """Fields with a summary of their latest pass (null if never processed).
+
+    `latest_pass.series` is the mean NDVI of up to the last 20 passes, oldest first (for sparklines);
+    `scouted_zone_count` counts the latest pass's zones that have at least one scouting note.
+    """
     with pool.connection() as conn:
-        return conn.execute(
+        rows = conn.execute(
             f"""
             SELECT {FIELD_COLUMNS},
                    CASE WHEN s.id IS NULL THEN NULL ELSE json_build_object(
                        'id', s.id, 'acquisition_date', s.acquisition_date, 'mean_ndvi', s.mean_ndvi::float,
+                       'stressed_area_sqm', s.stressed_area_sqm, 'raster_path', s.raster_path,
                        'stressed_pct', round((100 * s.stressed_area_sqm / (f.area_hectares * 10000))::numeric, 1)::float,
-                       'stress_zone_count', (SELECT count(*) FROM stress_zones z WHERE z.stats_id = s.id))
+                       'stress_zone_count', (SELECT count(*) FROM stress_zones z WHERE z.stats_id = s.id),
+                       'scouted_zone_count', (SELECT count(*) FROM stress_zones z WHERE z.stats_id = s.id
+                           AND EXISTS (SELECT 1 FROM scouting_notes n WHERE n.zone_id = z.id)),
+                       'series', (SELECT json_agg(m ORDER BY d) FROM (
+                           SELECT acquisition_date AS d, mean_ndvi::float AS m FROM ndvi_zonal_stats
+                           WHERE field_id = f.id ORDER BY acquisition_date DESC LIMIT 20) last))
                    END AS latest_pass
             FROM farm_fields f
             LEFT JOIN LATERAL (
@@ -155,6 +165,14 @@ def list_fields(user: CurrentUser):
             """,
             (user.org_id,),
         ).fetchall()
+    for r in rows:
+        p = r["latest_pass"]
+        if p:
+            series = p["series"] or []
+            p["mean_change"] = round(series[-1] - series[-2], 3) if len(series) > 1 else None
+            p["alert"] = p["mean_change"] is not None and p["mean_change"] <= -settings.alert_mean_drop
+            p["preview_url"] = public_preview_url(p.pop("raster_path"))
+    return rows
 
 
 @api.get("/fields/{field_id}")
@@ -211,6 +229,7 @@ def _stats_rows(conn, field: dict) -> list[dict]:
     field_sqm = field["area_hectares"] * 10000
     prev = None
     for r in rows:
+        r["preview_url"] = public_preview_url(r["raster_path"])
         r["tile_url"] = public_tile_url(r.pop("raster_path"))
         r["stressed_pct"] = round(100 * r["stressed_area_sqm"] / field_sqm, 1) if field_sqm else 0.0
         r["mean_change"] = None if prev is None else round(r["mean_ndvi"] - prev, 3)
@@ -222,9 +241,10 @@ def _stats_rows(conn, field: dict) -> list[dict]:
 def _zones(conn, stats_id) -> dict:
     rows = conn.execute(
         """
-        SELECT id, mean_ndvi::float, area_sqm, ST_AsGeoJSON(zone)::json AS geometry,
-               ST_AsGeoJSON(target)::json AS target
-        FROM stress_zones WHERE stats_id = %s ORDER BY mean_ndvi
+        SELECT z.id, z.mean_ndvi::float, z.area_sqm, ST_AsGeoJSON(z.zone)::json AS geometry,
+               ST_AsGeoJSON(z.target)::json AS target,
+               (SELECT count(*) FROM scouting_notes n WHERE n.zone_id = z.id) AS note_count
+        FROM stress_zones z WHERE z.stats_id = %s ORDER BY z.mean_ndvi
         """,
         (stats_id,),
     ).fetchall()
@@ -235,7 +255,8 @@ def _zones(conn, stats_id) -> dict:
                 "type": "Feature",
                 "id": str(r["id"]),
                 "geometry": r["geometry"],
-                "properties": {"mean_ndvi": r["mean_ndvi"], "area_sqm": r["area_sqm"], "target": r["target"]},
+                "properties": {"mean_ndvi": r["mean_ndvi"], "area_sqm": r["area_sqm"], "target": r["target"],
+                               "note_count": r["note_count"]},
             }
             for r in rows
         ],
@@ -308,18 +329,19 @@ def ndvi_mbtiles(stats_id: UUID, user: CurrentUser):
 
 # ---- Scouting notes and photos ----
 
-def _notes(conn, where: str, params: tuple) -> list[dict]:
+def _notes(conn, where: str, params: tuple, limit: int = 500) -> list[dict]:
     return conn.execute(
         f"""
-        SELECT n.id, n.field_id, n.zone_id, ST_Y(n.location) AS lat, ST_X(n.location) AS lon, n.accuracy_m,
-               n.category, n.note, n.observed_at, n.synced_at, u.display_name AS author,
+        SELECT n.id, n.field_id, f.field_name, n.zone_id, ST_Y(n.location) AS lat, ST_X(n.location) AS lon,
+               n.accuracy_m, n.category, n.note, n.observed_at, n.synced_at, u.display_name AS author,
                COALESCE((SELECT json_agg(p.id ORDER BY p.created_at) FROM note_photos p WHERE p.note_id = n.id),
                         '[]'::json) AS photo_ids
-        FROM scouting_notes n LEFT JOIN users u ON u.id = n.author_id
+        FROM scouting_notes n JOIN farm_fields f ON f.id = n.field_id LEFT JOIN users u ON u.id = n.author_id
         WHERE {where}
         ORDER BY n.observed_at DESC
+        LIMIT %s
         """,
-        params,
+        (*params, limit),
     ).fetchall()
 
 
@@ -413,6 +435,13 @@ def get_photo(photo_id: UUID, user: CurrentUser):
     if row is None:
         raise HTTPException(404, "photo not found")
     return FileResponse(row["path"], media_type=row["content_type"])
+
+
+@api.get("/notes")
+def recent_notes(user: CurrentUser, limit: int = 20):
+    """Latest scouting notes across the organization's fields, newest first."""
+    with pool.connection() as conn:
+        return _notes(conn, "f.org_id = %s", (user.org_id,), max(1, min(limit, 100)))
 
 
 @api.get("/fields/{field_id}/notes")

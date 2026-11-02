@@ -130,23 +130,29 @@ Relative mode assumes one crop per boundary. A polygon spanning several parcels 
 cd mobile
 flutter run                       # simulator/emulator: server defaults to localhost:8000 (iOS) / 10.0.2.2:8000 (Android)
 flutter test                      # unit tests: navigation math, declination, offline sync, MBTiles
-flutter drive --driver test_driver/integration_test.dart --target integration_test/scout_flow_test.dart
+./test_driver/run_ios.sh         # end-to-end on the booted iOS simulator, with screenshots in build/screenshots/
 ```
 
 On a real phone, enter the server's LAN address under **Server** on the sign-in screen. Also set the API's
 `TILER_PUBLIC_URL` to an address the phone can reach, because online NDVI tiles come straight from TiTiler.
 
-- **Fields**: latest pass, number of targets and stressed share. The download button saves the field for offline use:
-  boundary, stress zones and pre-rendered NDVI tiles (MBTiles, z12–17).
+- **Fields**: a *Scout next* card (the most stressed unscouted target, with distance), then each field's NDVI
+  thumbnail, alert, mean NDVI, stressed share and scouted targets. The download button saves the field for offline
+  use: boundary, stress zones, thumbnail and pre-rendered NDVI tiles (MBTiles, z12–17).
+  Bottom tabs: **Fields**, **My notes** (everything logged on this phone) and **Outbox** (not uploaded yet).
 - **Map**: satellite imagery (online only), NDVI overlay (offline when saved), stress zones, numbered targets
-  (1 = most stressed), your position, your observations (amber = not uploaded yet).
+  (1 = most stressed; lime = next up, outlined = scouted by anyone), a dotted route to the next target, your
+  position and your observations (amber = not uploaded yet).
 - **Navigate**: distance, compass direction and an arrow that turns with the phone. iOS gives true heading.
   Android gives magnetic heading, which the app corrects with the World Magnetic Model 2025. Without a compass
   (e.g. simulators) the arrow is north-up. "Arrived" shows within 10 m or the GPS accuracy, whichever is larger.
+  After logging an observation it moves on to the next open target.
 - **Observations**: category, notes, photos, GPS position and accuracy. Saved to an on-device outbox first, then
   uploaded on save, every minute, and when the app returns to the foreground. Note and photo ids are generated on
   the phone and the server ignores repeats, so interrupted uploads simply retry. A note the server rejects stays
   on the phone with its error and doesn't block the rest.
+
+Fonts (Manrope, JetBrains Mono, OFL) are bundled in `mobile/assets/fonts` so the app renders the same offline.
 
 API used by the app: `POST /api/auth/login`, `GET /api/fields`, `GET /api/fields/{id}/scouting`,
 `GET /api/stats/{id}/mbtiles`, `PUT /api/notes/{id}`, `PUT /api/notes/{id}/photos/{photo_id}` (raw image body).

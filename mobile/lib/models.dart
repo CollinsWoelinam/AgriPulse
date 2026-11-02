@@ -33,17 +33,27 @@ class FieldSummary {
   double get areaHa => (json['area_hectares'] as num).toDouble();
   Map<String, dynamic>? get latestPass => json['latest_pass'];
   List<List<LatLng>> get rings => outerRings(json['boundary']);
+
+  String? get passDate => latestPass?['acquisition_date'];
+  double? get meanNdvi => (latestPass?['mean_ndvi'] as num?)?.toDouble();
+  double? get meanChange => (latestPass?['mean_change'] as num?)?.toDouble();
+  bool get alert => latestPass?['alert'] == true;
+  double? get stressedPct => (latestPass?['stressed_pct'] as num?)?.toDouble();
+  int get zoneCount => (latestPass?['stress_zone_count'] as num?)?.toInt() ?? 0;
+  int get scoutedCount => (latestPass?['scouted_zone_count'] as num?)?.toInt() ?? 0;
+  String? get previewUrl => latestPass?['preview_url'];
 }
 
 class StressTarget {
   StressTarget({required this.zoneId, required this.rank, required this.point, required this.rings,
-      required this.meanNdvi, required this.areaSqm});
+      required this.meanNdvi, required this.areaSqm, this.noteCount = 0});
 
   final String zoneId;
   final int rank; // 1 = most stressed
   final LatLng point;
   final List<List<LatLng>> rings;
   final double meanNdvi, areaSqm;
+  final int noteCount; // server-side notes on this zone (any scout)
 }
 
 /// The cached offline package for one field: boundary, latest pass and its stress targets.
@@ -57,6 +67,8 @@ class ScoutingPackage {
   String? get passId => pass?['id'];
   String? get passDate => pass?['acquisition_date'];
   String? get tileUrl => pass?['tile_url'];
+  String? get previewUrl => pass?['preview_url'];
+  double? get medianNdvi => (pass?['median_ndvi'] as num?)?.toDouble();
   String? get mbtilesPath => json['mbtiles_url'];
 
   List<StressTarget> get targets {
@@ -74,6 +86,7 @@ class ScoutingPackage {
           rings: outerRings(f['geometry']),
           meanNdvi: (f['properties']['mean_ndvi'] as num).toDouble(),
           areaSqm: (f['properties']['area_sqm'] as num).toDouble(),
+          noteCount: (f['properties']['note_count'] as num?)?.toInt() ?? 0,
         ),
     ];
   }
